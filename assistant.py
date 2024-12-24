@@ -6,7 +6,11 @@ import logging as log
 import re
 import json
 import PyPDF2
+import openpyxl
 import pandas as pd
+import io
+import clipboard
+
 
 QE_ASSISTANT_ID = os.getenv("QE_ASSISTANT_ID")
 
@@ -94,65 +98,137 @@ def reset_kiwi():
         del st.session_state[key]
     st.rerun()
 
-# def find_or_create_vector_store(file_ids):
-#     vector_store = client.beta.vector_stores.create(name="Quality Engineer", file_ids=file_ids,
-#                                                     expires_after={"anchor": "last_active_at", "days": 1})
-#     return vector_store
-#
-#
-# def upload_file_to_openai(location):
-#     # Send File to OpenAI
-#     file = client.files.create(file=open(location, "rb"), purpose='assistants')
-#
-#     # Delete the temporary file
-#     os.remove(location)
-#
-#     return file.id
-#
-#
-# def update_assistant(vector_store):
-#     assistant = client.beta.assistants.update(
-#         assistant_id=QE_ASSISTANT_ID,
-#         tool_resources={"file_search": {"vector_store_ids": [vector_store.id]}}
-#     )
-#
-#     log.info("Assistant_id: {} has been updated with vector store: {}".format(assistant.id, vector_store.id))
-#
-#     return assistant.id
-#
-#
-# def startAssistantThread(prompt, vector_id):
-#     # Initiate Messages
-#     messages = [{"role": "user", "content": prompt}]
-#
-#     # Create the Thread
-#     tool_resources = {"file_search": {"vector_store_ids": [vector_id]}}
-#     thread = client.beta.threads.create(messages=messages, tool_resources=tool_resources)
-#
-#     return thread.id
-#
-#
-# def runAssistant(thread_id, assistant_id):
-#     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=assistant_id,
-#                                           instructions="Your name is Kiwi because it sounds like 'QE'. You are an accomplished quality engineer who can "
-#                                                        "create well-detailed test cases based on  provided given specs when provided by the user. "
-#                                                        "You can also provide feedback if a user shares their own test cases. ",
-#                                           tools=[{"type": "file_search"}])
-#     return run
-#
-#
-# def checkRunStatus(thread_id, run_id):
-#     run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
-#     return run.status
-#
-#
-# def retrieveThread(thread_id):
-#     thread_messages = client.beta.threads.messages.list((thread_id))
-#     list_messages = thread_messages.data
-#     thread_messages = []
-#     for message in list_messages:
-#         obj = {}
-#         obj['content'] = message.content[0].text.value
-#         obj['role'] = message.role
-#         thread_messages.append(obj)
-#     return thread_messages[::-1]
+
+# Function to remove Markdown formatting (like italics, bold, etc.)
+def clean_markdown(text):
+    # Remove italics (single * or _)
+    text = re.sub(r'(\*|_)(.*?)\1', r'\2', text)
+    # Remove bold (double ** or __)
+    text = re.sub(r'(\*\*|__)(.*?)\1', r'\2', text)
+    return text
+
+
+def extract_test_cases(text: str) -> list:
+    # Clean up any Markdown formatting (e.g., italics, bold)
+    text = clean_markdown(text)
+
+    test_case_patterns = [
+        r'(Test\s*Case\s*\d+\s*[:-].*?)(?=Test\s*Case|$)',
+        r'(Scenario\s*\d+\s*[:-].*?)(?=Scenario|$)',
+        r'(\d+\.\s*Test\s*Case.*?)(?=\d+\.\s*Test|$)'
+    ]
+
+    test_cases = []
+    for pattern in test_case_patterns:
+        matches = re.finditer(pattern, text, re.DOTALL | re.IGNORECASE)
+        for match in matches:
+            case_text = match.group(1).strip()
+
+            # Extract components
+            title_match = re.search(r"(?:Test Case \d+:|Scenario \d+:)\s*(.*?)(?=\n|$)", case_text)
+
+            objective_match = re.search(
+                r"Objective:\s*(.*?)(?=\n\s*(?:Preconditions?:|\s*Steps?:|\s*Expected Result?:)|$)", case_text,
+                re.DOTALL)
+            preconditions_match = re.search(r"Preconditions?:\s*(.*?)(?=\n\s*(?:Steps?:|\s*Expected Result?:)|$)",
+                                            case_text, re.DOTALL)
+
+            # Adjusted regex to capture the full Steps section, including multi-line content (like payloads)
+            steps_match = re.search(r"Steps?:\s*(.*?)(?=\n\s*(?:Expected Result?:|$))", case_text, re.DOTALL)
+            expected_match = re.search(r"Expected Result:\s*(.*?)(?=\n\s*(?:Test Case|Scenario|$|\Z)|\n[-]{2,}|\n{2,})",
+                                       case_text, re.DOTALL)
+
+            # Process steps as a list, adjusting for step numbers already present
+            steps = []
+            if steps_match:
+                step_matches = re.finditer(r"(\d+\.\s*.*?)(?=\n\s*\d+\.|\n\n|$)", steps_match.group(1), re.DOTALL)
+                for step in step_matches:
+                    # Strip the step number if it's already included
+                    step_text = step.group(1).strip()
+                    # Remove the leading number (e.g., "1. " or "2. ")
+                    step_text = re.sub(r"^\d+\.\s*", "", step_text)
+                    steps.append(step_text)
+
+            # Append extracted components
+            test_cases.append({
+                "title": title_match.group(1).strip() if title_match else "No Title Found",
+                "objective": objective_match.group(1).strip() if objective_match else "No Objective Found",
+                "preconditions": preconditions_match.group(1).strip() if preconditions_match else "No Preconditions Found",
+                "steps": steps if steps else "No Steps Found",
+                "expected_results": expected_match.group(1).strip() if expected_match else "No Expected Results Found"
+            })
+
+    return test_cases
+
+
+def download_test_cases(messages):
+    # Initialize or reset the download_format state variable
+    if "download_format" not in st.session_state:
+        st.session_state.download_format = False  # False when no format is selected
+
+    for message in reversed(messages):
+        if message["role"] == "assistant":
+            structured_data = extract_test_cases(message["content"])
+
+            # If no test cases were found, display an error and return
+            if not structured_data:
+                st.sidebar.error("No test cases found in most recent Kiwi response.")
+                return False
+
+            format_type = st.sidebar.selectbox("Select format", ("CSV", "XLSX", "TXT"), help="Only the most recent Kiwi response is analyzed when finding test cases.")
+            st.sidebar.markdown(f"Found **{len(structured_data)} test cases** generated from most recent Kiwi response")
+
+            # Ensure all required columns exist in the structured data
+            columns = ['title', 'objective', 'preconditions', 'steps', 'expected_results']
+            for col in columns:
+                if col not in structured_data[0]:
+                    structured_data[0][col] = "No {} data found.".format(col)
+
+            if format_type in ["CSV", "XLSX"]:
+                df = pd.DataFrame(structured_data)
+
+                # Ensure steps are in the correct format (a list of strings)
+                df['steps'] = df['steps'].apply(
+                    lambda steps: '\n'.join([f"{i + 1}) {step}" for i, step in enumerate(steps)]))
+
+                if format_type == "CSV":
+                    data = df.to_csv(index=False).encode('utf-8')
+                    mime = "text/csv"
+                else:
+                    buffer = io.BytesIO()
+                    df.to_excel(buffer, index=False, engine='openpyxl')
+                    data = buffer.getvalue()
+                    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            else:
+                text_content = ""
+                for case in structured_data:
+                    text_content += f"Title: {case['title']}\n"
+                    text_content += f"Objective: {case['objective']}\n"
+                    text_content += f"Preconditions: {case['preconditions']}\n"
+                    text_content += "Steps:\n"
+                    for i, step in enumerate(case['steps'], 1):
+                        text_content += f"  {i}. {step}\n"
+                    text_content += f"Expected Results: {case['expected_results']}\n\n"
+                    text_content += "=" * 50 + "\n\n"
+                data = text_content.encode('utf-8')
+                mime = "text/plain"
+
+            col1, col2 = st.sidebar.columns(2)
+            with col1:
+                st.download_button(
+                    label=f"Download as {format_type}",
+                    data=data,
+                    file_name=f"test_cases.{format_type.lower()}",
+                    mime=mime,
+                    key="download_button"
+                )
+            with col2:
+                if st.button("Close"):
+                    st.session_state.download_format = False
+                    st.rerun()
+
+            return True
+
+    # If no test cases are found, show an error message
+    st.sidebar.error("No test cases found in most recent Kiwi response.")
+    return False

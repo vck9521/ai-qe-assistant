@@ -6,9 +6,7 @@ from streamlit_extras.colored_header import colored_header
 from PIL import Image
 import st_functions
 from assistant import *
-import time
-import re
-import logging
+import logging as log
 from streamlit_extras.bottom_container import bottom
 
 # Load environment variables
@@ -36,6 +34,8 @@ if 'openai_files' not in st.session_state:
     st.session_state.openai_files = []
 if 'show_confirm' not in st.session_state:
     st.session_state.show_confirm = False  # Check if the restart confirmation dialog should be shown
+if "download_format" not in st.session_state:
+    st.session_state.download_format = False  # Default format
 
 # Customizing the UI
 st.set_page_config(page_title="Kiwi.ai", page_icon=":kiwifruit:")
@@ -52,15 +52,15 @@ st.sidebar.image(logo, width=100)
 
 # CUSTOMIZING THE MAIN PAGE
 with bottom():
-    st.caption("Kiwi can make mistakes. Contact vkim@equilar.com for any questions or inquiries.")
+    st.caption("Kiwi can make mistakes. Contact vincentchongkim@outlook.com for any questions or inquiries.")
 
 st.title("Kiwi, Your Personal QE Assistant")
 colored_header(label="Hi, I'm Kiwi the QE! :kiwifruit:", description="Ask me anything related to testing!",
                color_name="violet-70")
 
 # File Uploader Section
-uploaded_files = st.file_uploader("Upload Files", type=["docx", "html", "json", "pdf", "txt"],
-                                  accept_multiple_files=True, key="uploader")
+uploaded_files = st.file_uploader("Upload Files", type=["doc", "docx", "html", "json", "pdf", "txt"],
+                                  accept_multiple_files=True, key="uploader", help="**Only certain file types are supported!**")
 st.write("Please read https://platform.openai.com/docs/assistants/tools/file-search for supported file types.")
 
 # Process Newly Uploaded Files
@@ -84,7 +84,7 @@ if uploaded_files:
                             file=file_to_upload,
                             purpose='assistants'
                         )
-                    logging.info(f"Uploaded file: {openai_file}")
+                    log.info(f"Uploaded file: {openai_file}")
                     st.session_state.openai_files.append(openai_file.id)
 
                     # Process file content
@@ -135,6 +135,12 @@ if st.session_state.start_chat:
             st.markdown(message["content"])
             if "tokens" in message:
                 st.caption(f"Tokens used: {message['tokens']}")
+
+    # New download test cases button
+    if st.sidebar.button(" 📥 Download Generated Test Cases 📥"):
+        st.session_state.download_format = True
+    if st.session_state.download_format:
+        download_test_cases(st.session_state.messages)
 
     # Chat input
     prompt = st.chat_input("Please type here.")
