@@ -13,4 +13,6 @@ streamlit run kiwi.py
 
 ```
 
+## Kiwi Snippet
+![Kiwi_Preview](https://github.com/user-attachments/assets/04338a7a-e19b-4005-85b6-504e46302cea)
 
